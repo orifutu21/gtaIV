@@ -11,8 +11,38 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 W, H, FPS = 1080, 1920, 30
-DUR = 26.0
+DESIGN_DUR = 26.0
+# --- sincronización con la voz IA (voz/timeline.json, generado por gen_voz.py) ---
+import json
+TL_PATH = os.path.join(HERE, "voz", "timeline.json")
+TL = json.load(open(TL_PATH)) if os.path.exists(TL_PATH) else None
+if TL:
+    DUR = TL["duration"]
+    _P = {p["id"]: p for p in TL["phrases"]}
+    def _w(pid, word, nth=0):
+        hits = [w for w in _P[pid]["words"] if w["w"] == word]
+        return hits[nth]["s"]
+    # tiempo de diseño -> tiempo real (según la locución)
+    _ANCH = [
+        (0.0, 0.0), (3.0, _P["b"]["start"] - 0.05), (5.2, _w("b", "sino")),
+        (7.5, _P["c"]["start"]), (10.4, _w("c", "Juan")), (11.8, _w("c", "el", 1)),
+        (12.6, _w("c", "1513") - 0.5), (13.4, _w("c", "1513") + 0.35),
+        (14.5, _P["d"]["start"]), (16.6, _w("d", "Leonida")),
+        (19.5, _P["e"]["start"] - 0.1), (22.0, _P["f"]["start"] - 0.1), (DESIGN_DUR, DUR),
+    ]
+else:
+    DUR = DESIGN_DUR
+    _ANCH = [(0.0, 0.0), (DESIGN_DUR, DUR)]
+_AD = np.array([a for a, _ in _ANCH]); _AR = np.array([b for _, b in _ANCH])
+def to_design(t_real):
+    return float(np.interp(t_real, _AR, _AD))
+def to_real(t_design):
+    return float(np.interp(t_design, _AD, _AR))
 NFRAMES = int(DUR * FPS)
+# instantes (en tiempo de diseño) en que entra cada línea del gancho
+HOOK_T = [0.0, 0.25, 0.9, 1.25, 1.55]
+if TL:
+    HOOK_T = [max(0.0, to_design(_w("hook", w) - 0.12)) for w in ("El", "Leonida", "esconde", "explorador", "español")]
 
 FONT_BLACK = "/usr/share/fonts/opentype/inter/InterDisplay-Black.otf"
 FONT_BLACK_IT = "/usr/share/fonts/opentype/inter/InterDisplay-BlackItalic.otf"
@@ -342,36 +372,57 @@ def render_map(t, draw_frac, fill_a, morph, extra_a, route_frac=0.0, ship_a=0.0,
 # --------------------------------------------------------------------------
 # subtítulos (palabra a palabra)
 # --------------------------------------------------------------------------
-CAPTIONS = [
-    (3.0, 5.2, "GTA 6 no pasa en Florida,", {"Florida,"}),
-    (5.2, 7.4, "sino en Leonida.", {"Leonida."}),
-    (7.5, 9.0, "La teoría más extendida", {"teoría"}),
-    (9.0, 10.4, "es que el nombre viene de", set()),
-    (10.4, 11.8, "Juan Ponce de León,", {"Juan", "Ponce", "de", "León,"}),
-    (11.8, 13.0, "el explorador español", {"español"}),
-    (13.0, 14.5, "que llegó a Florida en 1513.", {"1513."}),
-    (14.5, 16.5, "León más Florida…", {"León", "Florida…"}),
-    (16.5, 19.3, "Leonida.", {"Leonida."}),
-]
+HL = {"Florida", "Leonida", "teoría", "Juan", "Ponce", "León", "español", "1513"}
+
+CHUNKS = {"b": [4, 2, 3], "c": [4, 4, 2, 4, 3, 4, 2], "d": [1, 2, 1]}
+
+def build_captions():
+    """Grupos de hasta 4 palabras con el instante real en que se pronuncia cada una."""
+    caps = []
+    if not TL:
+        return caps
+    for p in TL["phrases"]:
+        if p["id"] not in ("b", "c", "d"):
+            continue
+        toks = p["text"].split(" ")
+        words = p["words"]
+        if len(toks) != len(words):
+            toks = [w["w"] for w in words]
+        sizes = list(CHUNKS.get(p["id"], []))
+        group = []
+        for tok, w in zip(toks, words):
+            disp = "6" if tok == "seis" else tok
+            group.append((disp, w["s"]))
+            lim = sizes[0] if sizes else 4
+            if len(group) >= lim:
+                caps.append(group); group = []
+                if sizes:
+                    sizes.pop(0)
+        if group:
+            caps.append(group)
+        caps[-1].append(("__END__", p["end"] + 0.35))
+    out = []
+    for i, g in enumerate(caps):
+        end = g[-1][1] if g[-1][0] == "__END__" else caps[i + 1][0][1]
+        out.append(([x for x in g if x[0] != "__END__"], end))
+    return out
+
+CAPS = build_captions()
 CAP_Y = 1420
 
 def draw_caption(canvas, t):
-    for t0, t1, txt, hl in CAPTIONS:
-        if t0 <= t < t1:
-            words = txt.split(" ")
-            span = (t1 - t0) * 0.6
+    for words, end in CAPS:
+        if words[0][1] - 0.05 <= t < end:
             f = font(FONT_BLACK, 74)
             sp = f.getlength(" ")
-            widths = [f.getlength(w) for w in words]
+            widths = [f.getlength(w) for w, _ in words]
             total = sum(widths) + sp * (len(words) - 1)
             x = W / 2 - total / 2
-            for i, (wd, wl) in enumerate(zip(words, widths)):
-                ts = t0 + span * i / max(1, len(words))
-                if t >= ts:
-                    s = pop(t, ts, 0.18)
-                    col = YELLOW if wd in hl else WHITE
+            for (wd, ts), wl in zip(words, widths):
+                if t >= ts - 0.05:
+                    col = YELLOW if wd.strip(",.…") in HL else WHITE
                     ti = text_img(wd, 74, fill=col, stroke=8)
-                    paste_center(canvas, ti, x + wl / 2, CAP_Y, scale=s)
+                    paste_center(canvas, ti, x + wl / 2, CAP_Y, scale=pop(t, ts - 0.05, 0.18))
                 x += wl + sp
             break
 
@@ -390,11 +441,11 @@ def scene(canvas, t):
         l4 = text_img("EXPLORADOR", 128, fill=PINK, stroke=12)
         l5 = text_img("ESPAÑOL", 140, fill=PINK, stroke=12)
         out = 1 - prog(t, 2.75, 3.05)
-        paste_center(canvas, l1, W / 2 + shake, 520, pop(t, 0.0) , out)
-        paste_center(canvas, l2, W / 2 - shake, 690, pop(t, 0.25) * (1 + 0.03 * math.sin(t * 8)), out, rot=4)
-        paste_center(canvas, l3, W / 2, 870, pop(t, 0.9), out)
-        paste_center(canvas, l4, W / 2, 1020, pop(t, 1.25), out)
-        paste_center(canvas, l5, W / 2, 1170, pop(t, 1.55), out)
+        paste_center(canvas, l1, W / 2 + shake, 520, pop(t, HOOK_T[0]), out)
+        paste_center(canvas, l2, W / 2 - shake, 690, pop(t, HOOK_T[1]) * (1 + 0.03 * math.sin(t * 8)), out, rot=4)
+        paste_center(canvas, l3, W / 2, 870, pop(t, HOOK_T[2]), out)
+        paste_center(canvas, l4, W / 2, 1020, pop(t, HOOK_T[3]), out)
+        paste_center(canvas, l5, W / 2, 1170, pop(t, HOOK_T[4]), out)
         # signo de interrogación gigante de fondo
         q = text_img("?", 500, fill=(255, 255, 255), stroke=0, shadow=False)
         paste_center(canvas, q, W / 2 + 330, 360, 1.0, 0.10 * out, rot=-12 + t * 4)
@@ -599,7 +650,7 @@ def synth_audio(path):
         for f in chords[b % 4]:
             out[s0:s1] += 0.035 * (np.sin(2 * np.pi * f * tt) + 0.5 * np.sin(2 * np.pi * f * 1.005 * tt)) * env
     # whoosh en cortes
-    for c in CUTS:
+    for c in [to_real(x) for x in CUTS]:
         s0, s1 = int(max(0, c - 0.35) * SR), int(min(DUR, c + 0.15) * SR)
         nz = rng.standard_normal(s1 - s0)
         env = np.sin(np.linspace(0, np.pi, s1 - s0)) ** 2
@@ -610,7 +661,7 @@ def synth_audio(path):
             acc += a * (nz[j] - acc); y[j] = acc
         out[s0:s1] += 0.5 * y * env
     # "ding" al formar LEONIDA y al 1513
-    for c, f in [(16.6, 1318.5), (13.4, 987.8)]:
+    for c, f in [(to_real(16.6), 1318.5), (to_real(13.4), 987.8)]:
         s0, s1 = int(c * SR), int(min(DUR, c + 1.2) * SR)
         tt = t[s0:s1] - c
         out[s0:s1] += 0.18 * (np.sin(2 * np.pi * f * tt) + 0.4 * np.sin(2 * np.pi * f * 2 * tt)) * np.exp(-tt * 4)
@@ -646,25 +697,42 @@ def main():
             print(f"frame {fi}/{NFRAMES}", flush=True)
     ff.stdin.close(); ff.wait()
     synth_audio(music)
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", silent, "-i", music,
-                    "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", final], check=True)
+    voz = os.path.join(HERE, "voz", "voz.wav")
+    if TL and os.path.exists(voz):
+        # voz + música con ducking (la música baja cuando habla la voz)
+        fc = ("[2:a]asplit=2[v1][v2];"
+              "[1:a]volume=0.55[m0];"
+              "[m0][v1]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350[m];"
+              "[v2]highpass=f=70,acompressor=threshold=0.1:ratio=3:attack=5:release=80,volume=1.15[vv];"
+              "[m][vv]amix=inputs=2:normalize=0,alimiter=limit=0.95,loudnorm=I=-14:TP=-1.5:LRA=11[a]")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", silent, "-i", music, "-i", voz,
+                        "-filter_complex", fc, "-map", "0:v", "-map", "[a]",
+                        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-shortest", final], check=True)
+        # versión solo voz (sin música)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", silent, "-i", voz,
+                        "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest",
+                        os.path.join(HERE, "short1_leonida_solo_voz.mp4")], check=True)
+    else:
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", silent, "-i", music,
+                        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", final], check=True)
     print("OK ->", final)
 
 def render_frame(t, bg, vig):
+    td = to_design(t)
     c = bg.copy()
     draw_particles(c, t)
     draw_grid(c, t)
-    scene(c, t)
+    scene(c, td)
     draw_caption(c, t)
     c.alpha_composite(vig)
     # barra de progreso arriba
     d = ImageDraw.Draw(c)
     d.rectangle((0, 0, int(W * t / DUR), 10), fill=YELLOW + (255,))
-    z = punch_zoom(t)
+    z = punch_zoom(td)
     if z != 1.0:
         cw, ch = int(W / z), int(H / z)
         c = c.crop(((W - cw) // 2, (H - ch) // 2, (W - cw) // 2 + cw, (H - ch) // 2 + ch)).resize((W, H), Image.BILINEAR)
-    draw_flash(c, t)
+    draw_flash(c, td)
     return c
 
 if __name__ == "__main__":
