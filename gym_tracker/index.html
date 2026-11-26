@@ -6,6 +6,11 @@
 <meta name="theme-color" content="#0f1115">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>GymLog – Mi seguimiento</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-title" content="GymLog">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
 :root{
   --bg:#0f1115;--card:#181b22;--card2:#20242d;--line:#2b303b;--txt:#e9ecf2;--mut:#8d95a5;
@@ -13,7 +18,7 @@
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt);padding-bottom:84px;min-height:100vh}
-header{padding:16px 16px 8px;display:flex;justify-content:space-between;align-items:center}
+header{padding:calc(16px + env(safe-area-inset-top)) 16px 8px;display:flex;justify-content:space-between;align-items:center}
 header h1{font-size:22px}
 header h1 span{color:var(--acc)}
 main{padding:0 12px;max-width:760px;margin:0 auto}
@@ -663,6 +668,7 @@ function closeDlg(){$('dlg').close()}
 
 window.addEventListener('resize',()=>{if($('v-prog').classList.contains('on'))renderProgress();if($('v-body').classList.contains('on'))renderBody()});
 renderHome();
+if('serviceWorker' in navigator&&location.protocol.startsWith('http'))navigator.serviceWorker.register('sw.js').catch(()=>{});
 </script>
 </body>
 </html>
